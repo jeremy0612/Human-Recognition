@@ -1,0 +1,7 @@
+ultralytics
+opencv-python
+numpy
+aiohttp
+aiortc
+av  # Required for video handling
+aioice  # Required for WebRTC ICE 
