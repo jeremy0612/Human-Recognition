@@ -4,4 +4,6 @@ numpy
 aiohttp
 aiortc
 av  # Required for video handling
-aioice  # Required for WebRTC ICE 
+aioice  # Required for WebRTC ICE
+torch  # PyTorch for GPU acceleration
+torchvision  # Required for some YOLO operations 

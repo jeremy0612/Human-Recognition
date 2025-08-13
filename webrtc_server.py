@@ -10,6 +10,7 @@ from ultralytics import YOLO
 import logging
 import os
 from datetime import datetime
+import torch
 
 # Set up logging
 logging.basicConfig(
@@ -22,10 +23,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger('webrtc_server')
 
+# Check GPU availability and set device
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+logger.info(f"Using device: {device}")
+
+if device == 'cuda':
+    logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+    logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    # Set memory fraction to avoid OOM errors
+    torch.cuda.set_per_process_memory_fraction(0.8)
+
 # Global list to keep track of peer connections
 pcs = set()
-model = YOLO('yolov8n.pt')
-logger.info("YOLO model loaded successfully")
+
+# Load YOLO model on GPU if available
+try:
+    model = YOLO('yolov8n.pt')
+    if device == 'cuda':
+        model.to(device)
+        logger.info("YOLO model loaded successfully on GPU")
+    else:
+        logger.info("YOLO model loaded successfully on CPU")
+except Exception as e:
+    logger.error(f"Error loading YOLO model: {e}")
+    raise
 
 # Create result directory if it doesn't exist
 result_dir = "result"
@@ -79,22 +100,49 @@ class VideoTransformTrack(MediaStreamTrack):
             # Log every 100th frame
             if self.frame_count % 100 == 0:
                 logger.info(f"Processing frame {self.frame_count}, shape: {img.shape}")
+                if device == 'cuda':
+                    logger.info(f"GPU Memory: {torch.cuda.memory_allocated() / 1024**2:.1f} MB allocated, {torch.cuda.memory_reserved() / 1024**2:.1f} MB reserved")
             
-            # Run YOLO detection
-            results = model(img, verbose=False)
-            
-            # Get detections
-            detections = results[0].boxes.data.cpu().numpy()
-            
-            # Log detections
-            if len(detections) > 0:
-                self.detection_count += 1
-                classes = [int(det[5]) for det in detections]
-                class_names = [results[0].names[cls_id] for cls_id in classes]
-                logger.info(f"Frame {self.frame_count}: Detected {len(detections)} objects: {class_names}")
+            # Run YOLO detection with GPU acceleration
+            try:
+                results = model(img, verbose=False, device=device)
                 
-                # Save detection image if humans are present
-                self.save_detection_image(img, detections)
+                # Get detections
+                detections = results[0].boxes.data.cpu().numpy()
+                
+                # Log detections
+                if len(detections) > 0:
+                    self.detection_count += 1
+                    classes = [int(det[5]) for det in detections]
+                    class_names = [results[0].names[cls_id] for cls_id in classes]
+                    logger.info(f"Frame {self.frame_count}: Detected {len(detections)} objects: {class_names}")
+                    
+                    # Save detection image if humans are present
+                    self.save_detection_image(img, detections)
+                
+                # Clear GPU cache periodically to prevent memory buildup
+                if device == 'cuda' and self.frame_count % 100 == 0:
+                    torch.cuda.empty_cache()
+                    
+            except Exception as e:
+                logger.error(f"Error in YOLO inference: {e}")
+                # If GPU inference fails, fall back to CPU
+                if device == 'cuda':
+                    logger.info("Falling back to CPU inference")
+                    try:
+                        results = model(img, verbose=False, device='cpu')
+                        detections = results[0].boxes.data.cpu().numpy()
+                        if len(detections) > 0:
+                            self.detection_count += 1
+                            classes = [int(det[5]) for det in detections]
+                            class_names = [results[0].names[cls_id] for cls_id in classes]
+                            logger.info(f"Frame {self.frame_count}: CPU fallback - Detected {len(detections)} objects: {class_names}")
+                            self.save_detection_image(img, detections)
+                    except Exception as cpu_e:
+                        logger.error(f"CPU inference also failed: {cpu_e}")
+                        detections = np.array([])
+                else:
+                    detections = np.array([])
             
             # Process the frame for return (no need to draw on it since we're not displaying)
             # Just pass it through as is
