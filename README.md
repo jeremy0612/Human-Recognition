@@ -1,109 +1,65 @@
-# Customer Greeting System
+# Enhanced Robot Greeting System
 
-A comprehensive AI-powered customer greeting system that combines YOLO object detection, Motpy multi-object tracking, and statistical analysis to intelligently detect customer arrivals and departures.
+This system provides a computer vision-based robot greeting system with robust user tracking and re-identification capability.
 
-## 🌟 Features
+## Key Features
 
-### Core Functionality
-- **YOLO Human Detection**: Uses YOLOv8n for accurate human detection
-- **Motpy Multi-Object Tracking**: Consistent tracking with unique IDs for better customer behavior analysis
-- **Statistical Analysis**: Advanced statistical conditions (median/mode ratios) for reliable arrival/departure detection
-- **WebRTC Streaming**: Real-time video streaming with detection visualization
-- **TTS Integration**: Automatic text-to-speech greetings and farewells
-- **Image Logging**: Automatic saving of customer arrival/departure moments
+- **YOLO Object Detection**: Detects humans in camera feed with high accuracy
+- **Motpy Tracking**: Multi-object tracking with unique IDs
+- **Visual Re-identification**: Maintains identity even through temporary occlusions or movements
+- **Statistical Analysis**: Uses median/mode of area ratios for stability
+- **WebRTC Streaming**: Provides a web-based visualization interface
+- **TTS Integration**: Triggers welcome/farewell speech output
 
-### Key Components
-1. **YOLOHumanDetector**: YOLO-based detector integrated with motpy framework
-2. **CustomerGreetingSystem**: Main system combining detection, tracking, and statistical analysis
-3. **WebRTC Integration**: Real-time streaming with annotated frames
-4. **Statistical Engine**: Robust arrival/departure detection using area ratios
+## Enhancements for Stable User Tracking
 
-This Python implementation maintains full compatibility with the C++ version:
-- ✅ Same statistical thresholds
-- ✅ Same area ratio calculations  
-- ✅ Same arrival/departure logic
-- ✅ Same TTS integration
-- ✅ Enhanced with consistent tracking IDs
-- ✅ Simple WebRTC protocol implementation for further cloud oriented deployment.
+The system includes enhanced re-identification capabilities to solve common problems:
+- **Rapid movements**: When users gesture or move quickly
+- **Brief occlusions**: When users are temporarily hidden
+- **Frame exits/re-entries**: When users briefly step out of frame
+- **Background people**: Distinguishes main user from background people
 
-## 🏗️ Architecture
+## Configuration
 
-```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Webcam Feed   │───▶│  YOLO Detection  │───▶│ Motpy Tracking  │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                                                        │
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│ TTS Greetings   │◀───│ Statistical      │◀───│ Area Ratio      │
-│                 │    │ Analysis         │    │ Calculation     │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                                │
-                       ┌──────────────────┐
-                       │ WebRTC Streaming │
-                       │ & Image Logging  │
-                       └──────────────────┘
+Key parameters in `config.json`:
+
+```json
+{
+  "main_user_absence_threshold": 50,    // Frames before considering main user departed
+  "reid_feature_method": "histogram",   // Feature extraction method (histogram or hog)
+  "reid_similarity_threshold": 0.7,     // Minimum similarity to match identities
+  "reid_cache_duration": 120,           // How long to remember disappeared people
+  "reid_position_weight": 0.3,          // Weight for position in similarity calculation
+  "reid_area_weight": 0.2,              // Weight for area ratio in similarity calculation
+  "reid_min_consecutive_matches": 3,     // Minimum consecutive matches for stable tracking
+  "reid_stable_confidence_threshold": 0.75, // Confidence threshold for main user
+  "reid_cooldown_period": 30,           // Cooldown frames after departure
+}
 ```
 
-## 🚀 Quick Start
+## Running the System
 
-### Prerequisites
-- Python 3.8+
-- Webcam connected to the system
-- Conda environment (recommended)
-
-### Installation
-Both usual pip install or conda env are available, there might be few dependencies conflict.
 ```bash
-# Clone the repository
-cd human_recognition
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Download YOLO model (if not present)
-# The system will automatically download yolov8n.pt on first run
-```
-
-### Running the System
-```bash
-# Run the complete greeting system
 python main.py
-# Assuming that the webRTC server is currently running
 ```
 
+The system will:
+1. Detect people using YOLO
+2. Track them with motpy
+3. Extract visual features for each person
+4. Maintain identity through appearance matching
+5. Identify stable main user with highest confidence
+6. Trigger welcome/farewell based on stable tracking
 
-## 📁 File Structure
+## Re-identification Process
 
-```
-human_recognition/
-├── main.py                          # Main greeting system
-├── webrtc_server.py                 # WebRTC server (legacy)
-├── webrtc_client.py                 # WebRTC client (legacy)
-├── requirements.txt                 # Dependencies
-├── motpy/                           # Motpy tracking library
-│   ├── examples/
-│   │   ├── webcam_face_tracking.py  # Face tracking example
-│   │   └── detect_and_track_in_video.py
-│   └── motpy/                       # Core motpy modules
-├── result/                          # Saved detection images
-└── README.md                        # This file
-```
+The re-identification module provides enhanced stability by:
 
-## 🔧 Configuration
-A `config.json` file is provided to centralize all configuration parameters for the system. This template includes:
+1. **Feature Extraction**: Extracts visual features from each detected person
+2. **Identity Cache**: Maintains history of recently seen people
+3. **Similarity Matching**: Matches new detections with historical identities
+4. **Confidence Scoring**: Builds confidence through consecutive matches
+5. **Position Tracking**: Considers spatial position for better matching
+6. **Cooldown Periods**: Prevents rapid welcome/farewell cycles
 
-- **Motpy Tracker Settings**: Parameters such as `dt`, `max_staleness`, `min_iou`, and Kalman filter options, allowing you to fine-tune the multi-object tracking behavior.
-- **Statistical Conditions**: Thresholds for customer arrival and departure detection, including values like `HUMAN_COUNT_THRESHOLD`, `MEDIAN_RATIO_ARRIVAL_THRESHOLD`, `MODE_RATIO_ARRIVAL_THRESHOLD`, and their departure counterparts.
-- **Other System Settings**: You can also specify result directories, TTS API endpoints, and frame thresholds.
-
-## 📈 Performance
-
-- **Detection Speed**: ~15-30 FPS (depending on hardware)
-- **Memory Usage**: ~500MB (with YOLO model loaded)
-- **CPU Usage**: Moderate (optimized with frame delays)
-- **Accuracy**: High (YOLO + statistical validation)
-
-## 📄 License
-
-This project inherits the license from the motpy library components. Others used Apache-2.0 license. 
-
+This ensures the robot can reliably track the main user even through rapid movements, brief occlusions, or when they temporarily leave and re-enter the frame.

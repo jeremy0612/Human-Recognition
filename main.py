@@ -12,7 +12,7 @@ from aiortc import VideoStreamTrack, RTCPeerConnection, RTCSessionDescription
 from webrtc_server import init_server
 from aiohttp import web
 import threading
-from typing import Sequence, List, Optional, Dict, Any
+from typing import Sequence, List, Optional, Dict, Any, Tuple
 import statistics
 from collections import deque
 import requests
@@ -24,6 +24,9 @@ from motpy import Detection, MultiObjectTracker, NpImage
 from motpy.core import setup_logger
 from motpy.detector import BaseObjectDetector
 from motpy.testing_viz import draw_detection, draw_track
+
+# Import custom reidentification module
+from reidentification import PersonReIdentifier
 
 # Load configuration from config.json
 def load_config(config_path: str = "config.json") -> Dict[str, Any]:
@@ -125,6 +128,17 @@ class CustomerGreetingSystem:
         # Active tracks for analysis
         self.active_tracks = []
         
+        # Enhanced user tracking with object IDs
+        self.main_user_id = None  # Track ID of the main user (highest area ratio)
+        self.main_user_last_seen = 0  # Frame when main user was last detected
+        self.main_user_absence_threshold = config.get('main_user_absence_threshold', 10)  # Frames to wait before considering user departed
+        self.track_history = {}  # Track ID -> {last_seen: frame_num, max_area_ratio: float, first_seen: frame_num}
+        
+        # Person re-identification system
+        self.reidentifier = PersonReIdentifier(config)
+        self.departure_cooldown = 0  # Cooldown counter to prevent rapid welcome/departure cycles
+        self.cooldown_period = config.get('reid_cooldown_period', 30)  # Frames to wait after a departure before new welcome
+        
         print("🚀 Customer Greeting System initialized with configuration:")
         print(f"   • Welcome threshold: {self.HUMAN_COUNT_THRESHOLD} frames")
         print(f"   • Departure threshold: {self.NON_HUMAN_COUNT_THRESHOLD} frames")
@@ -188,6 +202,119 @@ class CustomerGreetingSystem:
             # If no unique mode, return median
             return statistics.median(rounded_ratios)
     
+    def update_track_history(self, stable_tracks):
+        """Update track history and identify main user based on area ratios and re-identification"""
+        current_tracks = set()
+        
+        # Create area_ratios dictionary for re-identification system
+        area_ratios = {}
+        
+        # Update existing tracks and identify potential main user
+        max_area_ratio = 0.0
+        potential_main_user = None
+        
+        for track in stable_tracks:
+            track_id = track.id
+            current_tracks.add(track_id)
+            area_ratio = self.calculate_area_ratio(track.box, self.latest_frame.shape)
+            area_ratios[track_id] = area_ratio
+            
+            # Legacy track history update (for backward compatibility)
+            if track_id not in self.track_history:
+                self.track_history[track_id] = {
+                    'first_seen': self.frame_counter,
+                    'last_seen': self.frame_counter,
+                    'max_area_ratio': area_ratio,
+                    'area_ratios': deque(maxlen=10)  # Store recent area ratios for this track
+                }
+            else:
+                self.track_history[track_id]['last_seen'] = self.frame_counter
+                self.track_history[track_id]['max_area_ratio'] = max(
+                    self.track_history[track_id]['max_area_ratio'], 
+                    area_ratio
+                )
+            
+            self.track_history[track_id]['area_ratios'].append(area_ratio)
+            
+            # Check if this could be the main user (highest area ratio)
+            # Legacy approach - we'll use re-identification for main user tracking instead
+            if area_ratio > max_area_ratio:
+                max_area_ratio = area_ratio
+                potential_main_user = track_id
+        
+        # Update re-identification system with current tracks
+        self.reidentifier.update_tracks(self.latest_frame, stable_tracks, area_ratios)
+        
+        # Get stable main user from re-identification system
+        stable_user_id, confidence = self.reidentifier.get_stable_main_user()
+        
+        # Check for stable user from re-identification system (preferred)
+        if stable_user_id is not None and stable_user_id in current_tracks:
+            # Use stable identified user as main user
+            if self.main_user_id != stable_user_id:
+                print(f"🎯 Main user identified via re-identification: ID {stable_user_id} (conf={confidence:.2f})")
+                self.main_user_id = stable_user_id
+            
+            self.main_user_last_seen = self.frame_counter
+        # Fallback to legacy approach
+        elif self.main_user_id is None and potential_main_user and max_area_ratio > 15.0:
+            self.main_user_id = potential_main_user
+            print(f"🎯 Main user identified via legacy method: Track ID {self.main_user_id} with area ratio {max_area_ratio:.2f}%")
+            self.main_user_last_seen = self.frame_counter
+        # Update main user last seen if they're still present (legacy approach)
+        elif self.main_user_id in current_tracks:
+            self.main_user_last_seen = self.frame_counter
+        
+        # Clean up old tracks that haven't been seen for a while (legacy approach)
+        tracks_to_remove = []
+        for track_id, history in self.track_history.items():
+            if self.frame_counter - history['last_seen'] > 30:  # Remove tracks not seen for 30 frames
+                tracks_to_remove.append(track_id)
+        
+        for track_id in tracks_to_remove:
+            del self.track_history[track_id]
+            if track_id == self.main_user_id and stable_user_id is None:
+                print(f"🚫 Main user track {track_id} removed from history")
+        
+        # Update departure cooldown if active
+        if self.departure_cooldown > 0:
+            self.departure_cooldown -= 1
+    
+    def check_main_user_departure(self) -> bool:
+        """Check if main user has departed based on track absence and re-identification"""
+        # If we're in cooldown period, don't detect departure
+        if self.departure_cooldown > 0:
+            return False
+            
+        if self.main_user_id is None:
+            return False
+        
+        # Get stable main user from re-identification system
+        stable_user_id, confidence = self.reidentifier.get_stable_main_user()
+        
+        # If re-identification still sees a stable main user, don't trigger departure
+        if stable_user_id is not None and confidence > self.reidentifier.stable_confidence_threshold:
+            return False
+            
+        frames_since_last_seen = self.frame_counter - self.main_user_last_seen
+        
+        # Main user departed if not seen for threshold frames
+        if frames_since_last_seen >= self.main_user_absence_threshold:
+            print(f"👋 Main user (Track ID {self.main_user_id}) departed after {frames_since_last_seen} frames absence")
+            # Activate cooldown period to prevent immediate welcome after departure
+            self.departure_cooldown = self.cooldown_period
+            return True
+        
+        return False
+    
+    def reset_main_user_tracking(self):
+        """Reset main user tracking state"""
+        print(f"🔄 Resetting main user tracking (was tracking ID: {self.main_user_id})")
+        self.main_user_id = None
+        self.main_user_last_seen = 0
+        # Note: We don't clear track_history or reidentifier history to maintain re-identification capability
+        # We only reset the main user designation
+    
     def save_detection_image(self, frame, prefix: str = "detection"):
         """Save the frame with detection boxes drawn"""
         try:
@@ -222,22 +349,29 @@ class CustomerGreetingSystem:
                 url = self.tts_endpoints.get('departure')
             else:
                 print(f"⚠️ Unknown TTS endpoint type: {endpoint_type}")
-                return
+                return False # Return False for unknown type
             
             if not url:
                 print(f"⚠️ No TTS endpoint configured for {endpoint_type}")
-                return
+                return False # Return False if URL not found
                 
-            # Make the request
-            print(f"🔊 Making TTS request to: {url}")
-            response = requests.post(url, json={}, timeout=5)
+            # Make the request with client_id in payload
+            payload = {"client_id": "fd9da2874b393784"}
+            print(f"🔊 Making TTS request to: {url} with payload: {payload}")
+            response = requests.post(url, json=payload, timeout=10) # Increased timeout
             
             if response.status_code == 200:
                 print(f"✅ TTS request successful: {endpoint_type}")
+                return True
             else:
-                print(f"⚠️ TTS request failed: {endpoint_type}, status: {response.status_code}")
+                print(f"⚠️ TTS request failed: {endpoint_type}, status: {response.status_code}, response: {response.text}")
+                return False
+        except requests.exceptions.Timeout:
+            print(f"⚠️ TTS request timeout: {url}")
+            return False
         except Exception as e:
             print(f"⚠️ TTS request error: {e}")
+            return False
     
     def process_frame_detections(self, frame):
         """Process frame for human detection and tracking"""
@@ -256,6 +390,9 @@ class CustomerGreetingSystem:
         # Filter for active tracks (minimum 3 steps alive for stability)
         stable_tracks = [track for track in self.active_tracks if hasattr(track, 'id')]
         
+        # Update track history and main user identification
+        self.update_track_history(stable_tracks)
+        
         # Create annotated frame for visualization and saving
         self.latest_annotated_frame = frame.copy()
         
@@ -263,8 +400,14 @@ class CustomerGreetingSystem:
         for det in detections:
             draw_detection(self.latest_annotated_frame, det)
         
-        for track in stable_tracks:
-            draw_track(self.latest_annotated_frame, track, thickness=2, text_at_bottom=True)
+        # Use the re-identifier to annotate the frame with enhanced information
+        self.latest_annotated_frame = self.reidentifier.annotate_frame(
+            self.latest_annotated_frame, stable_tracks)
+        
+        # Add cooldown indicator if active
+        if self.departure_cooldown > 0:
+            cv2.putText(self.latest_annotated_frame, f"COOLDOWN: {self.departure_cooldown}", 
+                       (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         # Calculate area ratios for statistical analysis
         has_human = False
@@ -338,10 +481,12 @@ class CustomerGreetingSystem:
         mode_ratio = self.calculate_mode_ratio(1.0)
         
         # ** Customer Arrival Detection **
+        # Don't welcome if we're in cooldown period after a departure
         if (self.human_count >= self.HUMAN_COUNT_THRESHOLD and 
             not self.current_human_detected and 
             median_ratio > self.MEDIAN_RATIO_ARRIVAL_THRESHOLD and 
-            mode_ratio > self.MODE_RATIO_ARRIVAL_THRESHOLD):
+            mode_ratio > self.MODE_RATIO_ARRIVAL_THRESHOLD and
+            self.departure_cooldown == 0):
             
             print(f"👤 CUSTOMER ARRIVAL DETECTED!")
             print(f"   • Human detected {self.human_count} times")
@@ -359,18 +504,29 @@ class CustomerGreetingSystem:
             # Update state
             self.current_human_detected = True
             self.human_count = 0
-            self.detection_ratios.clear()
+            # self.detection_ratios.clear()
         
-        # ** Customer Departure Detection **
-        elif (self.non_human_count > self.NON_HUMAN_COUNT_THRESHOLD and 
-              self.current_human_detected and 
-              median_ratio < self.MEDIAN_RATIO_DEPARTURE_THRESHOLD and 
-              mode_ratio < self.MODE_RATIO_DEPARTURE_THRESHOLD):
+        # ** Enhanced Customer Departure Detection **
+        # Check main user departure first (primary method)
+        main_user_departed = self.check_main_user_departure()
+        
+        # Traditional statistical departure detection (backup method)
+        statistical_departure = (self.non_human_count > self.NON_HUMAN_COUNT_THRESHOLD and 
+                                self.current_human_detected and 
+                                median_ratio < self.MEDIAN_RATIO_DEPARTURE_THRESHOLD and 
+                                mode_ratio < self.MODE_RATIO_DEPARTURE_THRESHOLD)
+        
+        # Trigger departure if either method detects departure
+        if (main_user_departed or statistical_departure) :#and self.current_human_detected:
             
-            print(f"👋 CUSTOMER DEPARTURE DETECTED!")
+            departure_method = "Main user tracking" if main_user_departed else "Statistical analysis"
+            print(f"👋 CUSTOMER DEPARTURE DETECTED! (Method: {departure_method})")
             print(f"   • No human detected for {self.non_human_count} frames")
             print(f"   • Median detection ratio: {median_ratio:.2f}% of frame")
             print(f"   • Mode detection ratio: {mode_ratio:.2f}% of frame")
+            if self.main_user_id:
+                frames_since_last_seen = self.frame_counter - self.main_user_last_seen
+                print(f"   • Main user (ID: {self.main_user_id}) last seen {frames_since_last_seen} frames ago")
             print("👋 Goodbye! Thanks for visiting!")
             
             # Save departure image
@@ -384,6 +540,9 @@ class CustomerGreetingSystem:
             self.non_human_count = 0
             self.human_count = 0
             self.detection_ratios.clear()
+            
+            # Reset main user tracking
+            self.reset_main_user_tracking()
 
 class VideoStream(VideoStreamTrack):
     """WebRTC video stream that provides the latest annotated frame from the greeting system"""
