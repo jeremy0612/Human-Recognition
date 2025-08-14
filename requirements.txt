@@ -5,5 +5,7 @@ aiohttp
 aiortc
 av  # Required for video handling
 aioice  # Required for WebRTC ICE
-torch  # PyTorch for GPU acceleration
-torchvision  # Required for some YOLO operations 
+requests  # For TTS API calls
+filterpy  # Required by motpy for Kalman filtering
+scipy  # Required by motpy for optimization 
+motpy # motpy tracker
