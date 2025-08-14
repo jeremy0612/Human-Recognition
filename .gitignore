@@ -1,5 +1,9 @@
 # User defined
 result/
+*.log
+*.pt
+*.jpg
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

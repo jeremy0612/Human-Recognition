@@ -4,4 +4,8 @@ numpy
 aiohttp
 aiortc
 av  # Required for video handling
-aioice  # Required for WebRTC ICE 
+aioice  # Required for WebRTC ICE
+requests  # For TTS API calls
+filterpy  # Required by motpy for Kalman filtering
+scipy  # Required by motpy for optimization 
+motpy # motpy tracker
