@@ -107,13 +107,12 @@ class VideoTransformTrack(MediaStreamTrack):
             logger.error(f"Error in recv: {e}")
             return frame
 
-async def index(request):
-    content = open('index.html', 'r').read()
-    return web.Response(content_type="text/html", text=content)
-
-async def javascript(request):
-    content = open('client.js', 'r').read()
-    return web.Response(content_type="application/javascript", text=content)
+async def health_check(request):
+    """Simple health check endpoint"""
+    return web.Response(
+        content_type="application/json",
+        text=json.dumps({"status": "ok", "message": "WebRTC server is running"})
+    )
 
 async def offer(request):
     params = await request.json()
@@ -169,15 +168,16 @@ async def on_shutdown(app):
     pcs.clear()
     logger.info("Server shutting down")
 
-def init_app():
+def init_server():
+    """Initialize the WebRTC server application"""
     app = web.Application()
     app.on_shutdown.append(on_shutdown)
-    app.router.add_get("/", index)
-    app.router.add_get("/client.js", javascript)
+    # Only add the /offer endpoint - no HTML/CSS/JS serving
+    app.router.add_get("/health", health_check)
     app.router.add_post("/offer", offer)
     return app
 
 if __name__ == "__main__":
-    app = init_app()
-    logger.info("Starting WebRTC server")
+    app = init_server()
+    logger.info("Starting WebRTC server (API only)")
     web.run_app(app, host="0.0.0.0", port=8080) 
