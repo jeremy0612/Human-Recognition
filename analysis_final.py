@@ -174,5 +174,3 @@ class PersonDetectionTracker:
             "person_detected": self.person_detected
         })
         return stats
-
-

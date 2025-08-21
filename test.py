@@ -1,163 +1,133 @@
 import ast
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple
 from collections import deque
 import statistics
 import time
-from datetime import datetime
 
-# --- Hàm tính tỷ lệ diện tích box so với frame ---
-def calculate_area_ratio(box: List[float], frame_shape: Tuple[int, int]) -> float:
-    frame_area = frame_shape[0] * frame_shape[1]  # height * width
-    box_area = (box[2] - box[0]) * (box[3] - box[1])  # (xmax - xmin) * (ymax - ymin)
-    return (box_area / frame_area) * 100.0  # trả về phần trăm
-
-# Alias function for compatibility
+# ==== CÁC HÀM TIỆN ÍCH ====
 def calculate_box_area_ratio(box: List[float], frame_width: int, frame_height: int) -> float:
-    return calculate_area_ratio(box, (frame_height, frame_width))
+    """
+    Tính tỉ lệ diện tích của box so với toàn bộ khung hình
+    """
+    frame_area = frame_width * frame_height
+    box_width = box[2] - box[0]
+    box_height = box[3] - box[1]
+    box_area = box_width * box_height
+    
+    return (box_area / frame_area) * 100.0
 
-# --- Hàm tính thống kê ---
-def calculate_statistics(ratios: List[float], mode_tolerance: float = 1.0) -> Tuple[float, float, float]:
+def calculate_statistics(ratios: deque, tolerance: float = 1.0) -> Dict[str, float]:
+    """
+    Tính các thống kê từ danh sách tỉ lệ
+    """
     if not ratios:
-        return 0.0, 0.0, 0.0
-
-    mean_ratio = sum(ratios) / len(ratios)
-    median_ratio = statistics.median(ratios)
-
-    # Làm tròn theo tolerance để tìm mode
-    rounded_ratios = [round(r / mode_tolerance) * mode_tolerance for r in ratios]
+        return {"mean": 0.0, "median": 0.0, "mode": 0.0}
+    
+    ratios_list = list(ratios)
+    
+    # Tính mean
+    mean_val = statistics.mean(ratios_list) if ratios_list else 0.0
+    
+    # Tính median
+    median_val = statistics.median(ratios_list) if ratios_list else 0.0
+    
+    # Tính mode với tolerance
     try:
-        mode_ratio = statistics.mode(rounded_ratios)
+        rounded_ratios = [round(ratio / tolerance) * tolerance for ratio in ratios_list]
+        mode_val = statistics.mode(rounded_ratios)
     except statistics.StatisticsError:
-        mode_ratio = median_ratio  # fallback nếu không có mode rõ ràng
+        mode_val = statistics.median(rounded_ratios) if rounded_ratios else 0.0
+    
+    return {
+        "mean": round(mean_val, 2),
+        "median": round(median_val, 2),
+        "mode": round(mode_val, 2)
+    }
 
-    return mean_ratio, median_ratio, mode_ratio
-
+# ==== CLASS TRACKER ====
 class PersonDetectionTracker:
+    """
+    Class theo dõi phát hiện người và xác định thời điểm đến/rời
+    """
+    
     def __init__(self, config: Dict[str, Any] = None):
-        # Cấu hình mặc định
-        self.config = {
-            'welcome_threshold': 5,
-            'departure_threshold': 10,
-            'median_ratio_threshold': 25.0,
-            'mode_ratio_threshold': 20.0,
-            'departure_median_threshold': 15.0,
-            'departure_mode_threshold': 10.0,
-            'arrival_time_seconds': 1.0,
-            'departure_time_seconds': 2.0,
-            'history_size': 30
-        }
-        
-        # Cập nhật cấu hình nếu có
-        if config:
-            self.config.update(config)
-            
-        # Trạng thái
+        self.config = config or {}
+        self.detection_ratios = deque(maxlen=1000)
+        self.frames_without_person = 0
         self.person_detected = False
-        self.detection_history = deque(maxlen=self.config['history_size'])
-        self.last_detection_time = None
-        self.human_count = 0
-        self.non_human_count = 0
-        
+        self.last_detection_time = 0
+        self.arrival_time_threshold = self.config.get('arrival_time_seconds', 2.0)
+        self.departure_time_threshold = self.config.get('departure_time_seconds', 3.0)
+    
     def update_detection(self, boxes: List[List[float]], frame_width: int, frame_height: int) -> Tuple[bool, str, Dict[str, float]]:
         """
-        Cập nhật detection và trả về:
-        - person_detected: True nếu có người được phát hiện
-        - status: 'arrival', 'departure', hoặc 'no_change'
-        - statistics: các thống kê về tỷ lệ diện tích
+        Cập nhật trạng thái detection và xác định hành động
         """
-        frame_time = datetime.now()
-        frame_shape = (frame_height, frame_width)
+        current_time = time.time()
+        has_person = len(boxes) > 0
         
-        # Tính tỷ lệ diện tích cho các boxes
-        ratios = [calculate_area_ratio(box, frame_shape) for box in boxes]
-        
-        # Cập nhật lịch sử
-        if ratios:
-            self.detection_history.extend(ratios)
-        
-        # Tính toán thống kê
-        mean_ratio, median_ratio, mode_ratio = calculate_statistics(list(self.detection_history))
-        stats = {
-            'mean': mean_ratio,
-            'median': median_ratio,
-            'mode': mode_ratio
-        }
-        
-        # Xác định trạng thái hiện tại
-        current_human_detected = len(boxes) > 0
-        
-        # Cập nhật bộ đếm
-        if current_human_detected:
-            self.human_count += 1
-            self.non_human_count = 0
+        # Cập nhật tỉ lệ nếu có người
+        if has_person:
+            self.frames_without_person = 0
+            for box in boxes:
+                ratio = calculate_box_area_ratio(box, frame_width, frame_height)
+                self.detection_ratios.append(ratio)
         else:
-            self.non_human_count += 1
-            self.human_count = 0
+            self.frames_without_person += 1
         
-        # Kiểm tra sự kiện đến/rời đi
-        event = detect_arrival_or_departure(
-            self.detection_history,
-            frame_time,
-            self.human_count,
-            self.non_human_count,
-            self.person_detected,
-            self.config
-        )
+        # Tính thống kê
+        stats = calculate_statistics(self.detection_ratios)
         
-        # Cập nhật trạng thái
-        if event == 'arrival':
-            self.person_detected = True
-            status = 'arrival'
-        elif event == 'departure':
-            self.person_detected = False
-            status = 'departure'
-        else:
-            status = 'no_change'
+        # Lấy các ngưỡng từ config
+        arrival_threshold = self.config.get('welcome_threshold', 20)
+        departure_threshold = self.config.get('departure_threshold', 18)
+        median_arrival_threshold = self.config.get('median_ratio_threshold', 30.0)
+        mode_arrival_threshold = self.config.get('mode_ratio_threshold', 20.0)
+        median_departure_threshold = self.config.get('departure_median_threshold', 50.0)
+        mode_departure_threshold = self.config.get('departure_mode_threshold', 40.0)
         
-        return self.person_detected, status, stats
+        # Xác định hành động
+        action = "none"
+        
+        # Kiểm tra điều kiện khách đến
+        if (len(self.detection_ratios) >= arrival_threshold and 
+            not self.person_detected and 
+            stats['median'] > median_arrival_threshold and 
+            stats['mode'] > mode_arrival_threshold):
+            action = "arrival"
+        
+        # Kiểm tra điều kiện khách rời đi
+        elif (self.frames_without_person >= departure_threshold and 
+              self.person_detected and 
+              stats['median'] < median_departure_threshold and 
+              stats['mode'] < mode_departure_threshold):
+            action = "departure"
+        
+        # Kiểm tra thời gian để xác nhận thay đổi trạng thái
+        if action == "arrival":
+            if current_time - self.last_detection_time >= self.arrival_time_threshold:
+                self.person_detected = True
+                self.last_detection_time = current_time
+                return True, "arrival", stats
+        
+        elif action == "departure":
+            if current_time - self.last_detection_time >= self.departure_time_threshold:
+                self.person_detected = False
+                self.last_detection_time = current_time
+                return False, "departure", stats
+        
+        return self.person_detected, "none", stats
     
     def get_state(self) -> Dict[str, Any]:
-        """Trả về trạng thái hiện tại của tracker"""
+        """Lấy trạng thái hiện tại"""
+        stats = calculate_statistics(self.detection_ratios)
         return {
-            'person_detected': self.person_detected,
-            'history_size': len(self.detection_history),
-            'human_count': self.human_count,
-            'non_human_count': self.non_human_count
+            "person_detected": self.person_detected,
+            "total_detections": len(self.detection_ratios),
+            "frames_without_person": self.frames_without_person,
+            "statistics": stats,
+            "last_detection_time": self.last_detection_time
         }
-
-# --- Hàm xác định người đến hoặc rời ---
-def detect_arrival_or_departure(
-    detection_ratios: deque,
-    frame_time: datetime,
-    human_count: int,
-    non_human_count: int,
-    current_human_detected: bool,
-    config: dict
-) -> Optional[str]:
-    """
-    Trả về: 'arrival', 'departure', hoặc None
-    """
-
-    mean_ratio, median_ratio, mode_ratio = calculate_statistics(list(detection_ratios))
-
-    # Điều kiện người đến
-    if (human_count >= config['welcome_threshold'] and
-        not current_human_detected and
-        median_ratio > config['median_ratio_threshold'] and
-        mode_ratio > config['mode_ratio_threshold']):
-        print(f"[{frame_time}] 👤 Người đến - Median: {median_ratio:.2f}% - Mode: {mode_ratio:.2f}%")
-        return 'arrival'
-
-    # Điều kiện người rời
-    elif (non_human_count >= config['departure_threshold'] and
-          current_human_detected and
-          median_ratio < config['departure_median_threshold'] and
-          mode_ratio < config['departure_mode_threshold']):
-        print(f"[{frame_time}] 👋 Người rời - Median: {median_ratio:.2f}% - Mode: {mode_ratio:.2f}%")
-        return 'departure'
-
-    return None
-
 
 # ==== HÀM PARSE VÀ TEST ====
 def parse_detection_line(line: str, frame_width: int = 640, frame_height: int = 480) -> List[List[float]]:
